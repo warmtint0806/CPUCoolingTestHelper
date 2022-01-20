@@ -1,9 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
-
-
 import wmi
 import os
 import time
@@ -11,15 +8,9 @@ from datetime import datetime
 import json
 import pythoncom
 
-
-# In[2]:
-
 import plotly
 import plotly.express as px
 import plotly.graph_objects as go
-
-
-# In[3]:
 
 import dash
 import dash_core_components as dcc
@@ -27,33 +18,15 @@ import dash_html_components as html
 import plotly.figure_factory as ff
 from dash.dependencies import Input, Output
 
-
-
-
-# In[4]:
 import webbrowser
-
-
-# In[6]:
-
-
-
-
-# In[7]:
-
-
-
-
-
-# In[ ]:
-
 
 import sys,threading
 from PyQt5 import QtWidgets, uic
-from PyQt5.QtCore import QObject, QRunnable, QThread, QThreadPool, pyqtSignal, pyqtSlot, QUrl 
+from PyQt5.QtCore import QObject, QRunnable, QThread, QThreadPool, pyqtSignal, pyqtSlot, QUrl, Qt 
 
 
-### In []: 
+# --- QDash
+
 class QDash(QObject):
     def __init__(self, temp_fig, clock_fig, parent=None):
         super().__init__(parent)
@@ -86,19 +59,18 @@ class QDash(QObject):
     def run(self, **kwargs):
         threading.Thread(target=self.app.run_server, kwargs=kwargs, daemon=True).start()
 
-### In []: 
+# ---- Collecting Workers 
         
-
-
 qtcreator_file  = "main.ui" # Enter file here.
 Ui_MainWindow, QtBaseClass = uic.loadUiType(qtcreator_file)
 
 class WorkerSignals(QObject): 
     finished=pyqtSignal()
     progress=pyqtSignal(tuple)
+    inspectionDone=pyqtSignal(dict)
 
 class Worker(QRunnable):
-    def __init__(self,temp_fig,clock_fig,dt,totaltime,trialName,filepath):
+    def __init__(self,temp_fig,clock_fig,dt,totaltime,trialName,filepath,temp_sensors,clock_sensors):
         super(Worker, self).__init__()
         self.temp_fig=temp_fig
         self.clock_fig=clock_fig
@@ -107,6 +79,8 @@ class Worker(QRunnable):
         self.totaltime=totaltime
         self.trialName=trialName
         self.filepath=filepath
+        self.temp_sensors=temp_sensors
+        self.clock_sensors=clock_sensors
         
     
     def record_data(self,result,cur_time,elp_time,temperature_infos):
@@ -123,9 +97,6 @@ class Worker(QRunnable):
                 else:
                     result[sensor.Name]={}
                     result[sensor.Name][sensor.SensorType]=[sensor.Value]
-
-
-# In[5]:
 
     def add_fig_traces(self,fig,idx_names):
         for name in idx_names:
@@ -151,11 +122,15 @@ class Worker(QRunnable):
         #dt=0.5
         #totaltime=60
         trial_name=self.trialName
-    
-        data_name=[trial_name+'CPU Package Power','CPU Package T', 'C#1 T', 'C#2 T']
+        
+        #data_name=[trial_name+'CPU Package Power','CPU Package T', 'C#1 T', 'C#2 T']
+        data_name=self.temp_sensors.copy()
+        data_name[0]=trial_name + '_' + data_name[0]
         self.add_fig_traces(temp_fig,data_name)
     
-        data_name=[trial_name + 'C#1 clock', 'C#2 clock']
+        #data_name=[trial_name + 'C#1 clock', 'C#2 clock']
+        data_name=self.clock_sensors.copy()
+        data_name[0]=trial_name + '_' + data_name[0]
         self.add_fig_traces(clock_fig,data_name)
     
         result={"time":[],"elp_time":[]}
@@ -168,24 +143,25 @@ class Worker(QRunnable):
             elapsed=current_time-init_time
         
             self.record_data(result,current_time,elapsed,self.w.Sensor())
+            
+            data_to_draw=[]
+            clock_data_to_draw=[]
+            for temp_sensor in self.temp_sensors:
+                data_to_draw.append(result[temp_sensor]['Temperature'][-1])
+            for clock_sensor in self.clock_sensors:
+                clock_data_to_draw.append(result[clock_sensor]['Clock'][-1])
+            #data_to_draw=[
+            #       #result['CPU Package']['Power'][-1],
+            #       result['CPU Package']['Temperature'][-1],
+            #       result['CPU Core #1']['Temperature'][-1],
+            #       result['CPU Core #2']['Temperature'][-1]]
     
-            data_to_draw=[
-                   result['CPU Package']['Power'][-1],
-                   result['CPU Package']['Temperature'][-1],
-                   result['CPU Core #1']['Temperature'][-1],
-                   result['CPU Core #2']['Temperature'][-1]]
-    
-            clock_data_to_draw=[
-                   result['CPU Core #1']['Clock'][-1],
-                   result['CPU Core #2']['Clock'][-1]]
+            #clock_data_to_draw=[
+            #       result['CPU Core #1']['Clock'][-1],
+            #       result['CPU Core #2']['Clock'][-1]]
     
             self.update_fig_traces(temp_fig,elapsed,data_to_draw)
             self.update_fig_traces(clock_fig,elapsed,clock_data_to_draw)
-    
-            #print((elapsed,
-            #       data_to_draw))
-            #print((elapsed,
-            #       clock_data_to_draw))
             
             time.sleep(dt)
             self.signals.progress.emit((elapsed,totaltime))
@@ -197,7 +173,35 @@ class Worker(QRunnable):
         filename=self.filepath+'/'+trial_name+'_'+datetime.now().strftime('%Y%m%d-%H_%M_%S')+'.json'
         with open(filename, 'w') as fp:
             json.dump(result, fp,  indent=4)
-
+            
+class Init_Worker(QRunnable): 
+    def __init__(self):
+        super(Init_Worker,self).__init__()
+        self.signals=WorkerSignals()
+    
+    def gather_data(self,temperature_infos):
+        result={"Temperatures":[],"Clocks":[]}
+        
+        for sensor in temperature_infos:
+            if sensor.Name.startswith("CPU"):
+                if sensor.SensorType == "Temperature":     
+                    result["Temperatures"].append(sensor.Name)
+                elif sensor.SensorType == "Clock":
+                    result["Clocks"].append(sensor.Name)
+                    
+        return result
+    
+    
+    @pyqtSlot()
+    def run(self): 
+        pythoncom.CoInitialize()
+        self.w=wmi.WMI(namespace="root\OpenHardwareMonitor")
+        result=self.gather_data(self.w.Sensor())
+        self.signals.inspectionDone.emit(result)
+        pythoncom.CoUninitialize()
+        
+# ---- PyQt Main Window
+        
 class MyApp(QtWidgets.QMainWindow, Ui_MainWindow):
     def __init__(self):
         QtWidgets.QMainWindow.__init__(self)
@@ -217,8 +221,7 @@ class MyApp(QtWidgets.QMainWindow, Ui_MainWindow):
                                         'duration': 500,
                                         'easing': 'cubic-in-out'
                                     })
-        #self.show_temp_graph()
-        #self.show_clock_graph()
+
         print(self.temp_fig)
         self.threadpool=QThreadPool()
         print("Multithreading with maximum %d threads" % self.threadpool.maxThreadCount())
@@ -234,8 +237,11 @@ class MyApp(QtWidgets.QMainWindow, Ui_MainWindow):
         self.qdash=QDash(temp_fig=self.temp_fig, clock_fig=self.clock_fig)
         self.qdash.run(debug=True, use_reloader=False)
         self.open_graph_in_browser()
-        #self.temp_graph_browser.load(QUrl("http://127.0.0.1:8050"))
-        #self.temp_graph_browser.show()
+        
+        self.sensor_check()
+        self.cpu_temperature_display_candidate_list=[]
+        self.cpu_clock_display_candidate_list=[]
+        
     def open_graph_in_browser(self):
         webbrowser.open('http://127.0.0.1:8050',1)
     
@@ -243,13 +249,52 @@ class MyApp(QtWidgets.QMainWindow, Ui_MainWindow):
         print(self.reloadUrl.text())
         self.temp_graph_browser.load(QUrl(self.reloadUrl.text()))
         self.temp_graph_browser.show()
+        
     def start_record(self):
+        sensor_to_display=self.return_checked_sensor_list()
         self.worker=Worker(self.temp_fig, self.clock_fig, self.dt_dial.value() *0.5, self.totalTimeBox.value() * 60, 
-                           self.trialNameBox.text(),self.pathLabel.text())
+                           self.trialNameBox.text(),self.pathLabel.text(),
+                           sensor_to_display['Temperatures'], sensor_to_display['Clocks'])
         #self.worker.signals.progress.connect(self.show_temp_graph)
         self.worker.signals.progress.connect(self.progressBar_setValue)
         #self.worker.signals.progress.connect(self.show_clock_graph)
         self.threadpool.start(self.worker)
+    
+    def sensor_check(self):
+        self.check_worker=Init_Worker()
+        self.check_worker.signals.inspectionDone.connect(self.update_sensor_list)
+        self.threadpool.start(self.check_worker)
+    
+    def update_sensor_list(self,result):
+        for temp_sensor in result['Temperatures']:
+            item=QtWidgets.QListWidgetItem(temp_sensor)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+    
+            self.temperatureSensorList.addItem(item)
+        for clock_sensor in result['Clocks']:
+            item=QtWidgets.QListWidgetItem(clock_sensor)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            self.clockSensorList.addItem(item)
+        
+        self.temperatureSensorList.itemSelectionChanged.connect(self.return_checked_sensor_list)
+
+        print(result)
+    
+    def return_checked_sensor_list(self): 
+        checked_items={"Temperatures":[], "Clocks":[]}
+        
+        for index in range(self.temperatureSensorList.count()):
+            if self.temperatureSensorList.item(index).checkState() == Qt.Checked:
+                checked_items['Temperatures'].append(self.temperatureSensorList.item(index).text())
+        
+        for index in range(self.clockSensorList.count()):
+            if self.clockSensorList.item(index).checkState() == Qt.Checked:
+                checked_items['Clocks'].append(self.clockSensorList.item(index).text())
+        print(checked_items)
+        return checked_items
+    
     def dt_dialChanged(self): 
         self.dt_label.setText(str(self.dt_dial.value()*0.5) + ' s')
     
@@ -275,20 +320,12 @@ class MyApp(QtWidgets.QMainWindow, Ui_MainWindow):
         #self.clock_graph_browser.setHtml(self.clock_fig.to_html(include_plotlyjs='cdn'))
         print(self.clock_fig)
 
+
+# ---- Main Loops
 app = QtWidgets.QApplication(sys.argv)
 window = MyApp()
 window.show()
 sys.exit(app.exec_())
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
 
 
 
