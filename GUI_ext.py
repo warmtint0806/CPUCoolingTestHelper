@@ -26,10 +26,16 @@ from PyQt5 import QtWidgets, uic
 from PyQt5.QtCore import QObject, QRunnable, QThread, QThreadPool, pyqtSignal, pyqtSlot, QUrl, Qt 
 
 
+# --- ext sensor manage
+
+import ext_manager
+import ext_sensor_add_GUI
+import requests
+
 # --- QDash
 
 class QDash(QObject):
-    def __init__(self, temp_fig, clock_fig, parent=None):
+    def __init__(self, temp_fig, clock_fig, parent=None, ext_temp_fig=None, ext_humidity_fig=None):
         super().__init__(parent)
 
         self._app = dash.Dash()
@@ -41,6 +47,10 @@ class QDash(QObject):
                 dcc.Graph(id='live-update-graph'),
                 html.H5('CPU clocks'),
                 dcc.Graph(id='live-update-graph2'),
+                html.H5('External Temperatures'),
+                dcc.Graph(id='live-update-graph3'),
+                html.H5('External Humidities'),
+                dcc.Graph(id='live-update-graph4'),
                 dcc.Interval(id='interval-component',
                              interval=1*2000,
                              n_intervals=0),
@@ -50,6 +60,9 @@ class QDash(QObject):
                 ]))
         self.temp_fig=temp_fig
         self.clock_fig=clock_fig
+        self.ext_temp_fig=ext_temp_fig
+        self.ext_humidity_fig=ext_humidity_fig
+        
         self.clear_trial=0
     
         @self._app.callback(Output('interval-component', 'disabled'),Input('interval-control-component','n_intervals'))
@@ -70,6 +83,14 @@ class QDash(QObject):
         @self._app.callback(Output('live-update-graph2', 'figure'),Input('interval-component','n_intervals'))
         def update_graph2(n):
             return self.clock_fig
+        
+        @self._app.callback(Output('live-update-graph3', 'figure'),Input('interval-component','n_intervals'))
+        def update_graph3(n):
+            return self.ext_temp_fig
+        
+        @self._app.callback(Output('live-update-graph4', 'figure'),Input('interval-component','n_intervals'))
+        def update_graph4(n):
+            return self.ext_humidity_fig
     @property
     def app(self):
         return self._app
@@ -79,7 +100,7 @@ class QDash(QObject):
 
 # ---- Collecting Workers 
         
-qtcreator_file  = "main.ui" # Enter file here.
+qtcreator_file  = "main_ext.ui" # Enter file here.
 Ui_MainWindow, QtBaseClass = uic.loadUiType(qtcreator_file)
 
 class WorkerSignals(QObject): 
@@ -89,7 +110,8 @@ class WorkerSignals(QObject):
     registerData=pyqtSignal(str)
 
 class Worker(QRunnable):
-    def __init__(self,temp_fig,clock_fig,dt,totaltime,trialName,filepath,temp_sensors,clock_sensors,data_name=None):
+    def __init__(self,temp_fig,clock_fig,dt,totaltime,trialName,filepath,temp_sensors,clock_sensors,data_name=None, 
+                 ext_sensor_ip_list=None, ext_temp_fig=None, ext_humidity_fig=None):
         super(Worker, self).__init__()
         self.temp_fig=temp_fig
         self.clock_fig=clock_fig
@@ -100,11 +122,33 @@ class Worker(QRunnable):
         self.filepath=filepath
         self.temp_sensors=temp_sensors
         self.clock_sensors=clock_sensors
+        
+        self.ext_sensor_ip_list=ext_sensor_ip_list
+        self.ext_sensor_collector=None
+        self.ext_temp_fig=ext_temp_fig
+        self.ext_humidity_fig=ext_humidity_fig
+        if ext_sensor_ip_list:
+            self.ext_sensor_collector=ext_manager.ext_sensor_collector(ext_sensor_ip_list)
         if (data_name):
             self.data_name=data_name
         else:
             self.data_name=self.trialName+'-'+datetime.now().strftime('%Y%m%d-%H_%M_%S')
+    
+    def record_ext_data(self,result,sensor_data_list):
+        #result['time'].append(cur_time)
+        #result['elp_time'].append(elp_time)
+        for sensor in sensor_data_list:
+            print(sensor)
+            sensor_name=sensor['name']
+            if sensor_name in result:
+                    result['ext'][sensor_name]['h'].append(sensor['h'])
+                    result['ext'][sensor_name]['t'].append(sensor['t'])
+            else:
+                result['ext'][sensor_name]={}
+                result['ext'][sensor_name]['h']=[sensor['h']]
+                result['ext'][sensor_name]['t']=[sensor['t']]
         
+    
     def record_data(self,result,cur_time,elp_time,temperature_infos):
         result['time'].append(cur_time)
         result['elp_time'].append(elp_time)
@@ -156,8 +200,19 @@ class Worker(QRunnable):
         idx_name=self.clock_sensors.copy()
         idx_name[0]=trial_name + '_' + idx_name[0]
         self.add_fig_traces(clock_fig,idx_name,self.data_name)
+        
+        #data_name=[trial_name + 'C#1 clock', 'C#2 clock']
+        idx_name=self.ext_sensor_ip_list.copy()
+        if(len(idx_name)>0):
+            idx_name[0]=trial_name + '_' + idx_name[0]
+            print(idx_name[0])
+            self.add_fig_traces(self.ext_temp_fig,idx_name,self.data_name)
+            
+            idx_name=self.ext_sensor_ip_list.copy()
+            idx_name[0]=trial_name + '_' + idx_name[0]
+            self.add_fig_traces(self.ext_humidity_fig,idx_name,self.data_name)
     
-        result={"time":[],"elp_time":[]}
+        result={"time":[],"elp_time":[],'ext':{}}
         init_time=time.time()
         pythoncom.CoInitialize()
         self.w=wmi.WMI(namespace="root\OpenHardwareMonitor")
@@ -167,16 +222,29 @@ class Worker(QRunnable):
             elapsed=current_time-init_time
         
             self.record_data(result,current_time,elapsed,self.w.Sensor())
+            if self.ext_sensor_collector:
+                new_data=self.ext_sensor_collector.get_data()
+                self.record_ext_data(result, new_data)
+                print(new_data)
             
             data_to_draw=[]
             clock_data_to_draw=[]
+            ext_temp_data_to_draw=[]
+            ext_humidity_data_to_draw=[]
+            
             for temp_sensor in self.temp_sensors:
                 data_to_draw.append(result[temp_sensor]['Temperature'][-1])
             for clock_sensor in self.clock_sensors:
                 clock_data_to_draw.append(result[clock_sensor]['Clock'][-1])
     
+            for ext_sensor in result['ext']:
+                ext_temp_data_to_draw.append(result['ext'][ext_sensor]['t'][-1])
+                ext_humidity_data_to_draw.append(result['ext'][ext_sensor]['h'][-1])
+                
             self.update_fig_traces(temp_fig,elapsed,data_to_draw)
             self.update_fig_traces(clock_fig,elapsed,clock_data_to_draw)
+            self.update_fig_traces(self.ext_temp_fig,elapsed,ext_temp_data_to_draw)
+            self.update_fig_traces(self.ext_humidity_fig,elapsed,ext_humidity_data_to_draw)
             
             time.sleep(dt)
             self.signals.progress.emit((elapsed,totaltime))
@@ -215,32 +283,30 @@ class Init_Worker(QRunnable):
         result=self.gather_data(self.w.Sensor())
         self.signals.inspectionDone.emit(result)
         pythoncom.CoUninitialize()
-
-# ---- Graph Manager 
-        
+   
 # ---- PyQt Main Window
-        
+
+def create_new_fig():
+    new_fig=go.Figure()
+    new_fig.update_layout(width=1600,height=450, 
+                                    margin=dict(l=100, r=20, t=0, b=0), 
+                                    transition={
+                                        'duration': 500,
+                                        'easing': 'cubic-in-out'
+                                    })
+    return new_fig
+
 class MyApp(QtWidgets.QMainWindow, Ui_MainWindow):
     def __init__(self):
         QtWidgets.QMainWindow.__init__(self)
         Ui_MainWindow.__init__(self)
         self.setupUi(self)
-        self.temp_fig=go.Figure()
-        self.temp_fig.update_layout(width=1600,height=450, 
-                                    margin=dict(l=20, r=20, t=0, b=0), 
-                                    transition={
-                                        'duration': 500,
-                                        'easing': 'cubic-in-out'
-                                    })
-        self.clock_fig=go.Figure()
-        self.clock_fig.update_layout(width=1600,height=450, 
-                                     margin=dict(l=20, r=20, t=0, b=0),
-                                      transition={
-                                        'duration': 500,
-                                        'easing': 'cubic-in-out'
-                                    })
+        self.temp_fig=create_new_fig()
+        self.clock_fig=create_new_fig()
+        self.ext_temp_fig=create_new_fig()
+        self.ext_humidity_fig=create_new_fig() 
 
-        print(self.temp_fig)
+        #print(self.temp_fig)
         self.threadpool=QThreadPool()
         print("Multithreading with maximum %d threads" % self.threadpool.maxThreadCount())
         
@@ -248,14 +314,14 @@ class MyApp(QtWidgets.QMainWindow, Ui_MainWindow):
         self.runButton.clicked.connect(self.start_record)
         self.stopButton.clicked.connect(self.activate_run_features)
         
-        
         self.reloadButton.clicked.connect(self.open_graph_in_browser)
         self.dt_dial.valueChanged.connect(self.dt_dialChanged)
         
         self.set_filePathInit()
         self.pathButton.clicked.connect(self.set_filePath)
         
-        self.qdash=QDash(temp_fig=self.temp_fig, clock_fig=self.clock_fig)
+        self.qdash=QDash(temp_fig=self.temp_fig, clock_fig=self.clock_fig, 
+                         ext_temp_fig=self.ext_temp_fig, ext_humidity_fig=self.ext_humidity_fig)
         self.qdash.run(debug=True, use_reloader=False)
         self.open_graph_in_browser()
         
@@ -267,6 +333,30 @@ class MyApp(QtWidgets.QMainWindow, Ui_MainWindow):
         self.clearGraphsButton.clicked.connect(self.clear_graphs)
         self.removeDataButton.clicked.connect(self.clear_selected_graph)
         
+        #external sensor related
+        self.addExtSensorButton.clicked.connect(self.open_ext_sensor_add_dialog)
+     
+    def open_ext_sensor_add_dialog(self): 
+        dlg=ext_sensor_add_GUI.IPAddDialog()
+        dlg.exec_()
+        print((dlg.ip,dlg.sensorName))
+        if (dlg.ip and dlg.sensorName):
+            self.add_ext_sensor(dlg.ip,dlg.sensorName)
+        
+    def add_ext_sensor(self, ip, sensor_name=None):
+        item=QtWidgets.QListWidgetItem(ip + ' | ' + sensor_name)
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setCheckState(Qt.Checked)
+        item.setData(Qt.UserRole, (ip,sensor_name))
+        self.extSensorList.addItem(item)    
+    
+    def return_ext_sensor_ip_list(self):
+        sensor_ip_list=[]
+        for index in range(self.extSensorList.count()):
+            if self.extSensorList.item(index).checkState() == Qt.Checked:
+                sensor_ip_list.append(self.extSensorList.item(index).data(Qt.UserRole)[0])
+        return sensor_ip_list
+
     def open_graph_in_browser(self):
         webbrowser.open('http://127.0.0.1:8050',1)
     
@@ -277,9 +367,13 @@ class MyApp(QtWidgets.QMainWindow, Ui_MainWindow):
         
     def start_record(self):
         sensor_to_display=self.return_checked_sensor_list()
+        ext_sensor_ip_list=self.return_ext_sensor_ip_list()
         self.worker=Worker(self.temp_fig, self.clock_fig, self.dt_dial.value() *0.5, self.totalTimeBox.value() * 60, 
                            self.trialNameBox.text(),self.pathLabel.text(),
-                           sensor_to_display['Temperatures'], sensor_to_display['Clocks'])
+                           sensor_to_display['Temperatures'], sensor_to_display['Clocks'],
+                           ext_sensor_ip_list=ext_sensor_ip_list, 
+                           ext_temp_fig=self.ext_temp_fig, 
+                           ext_humidity_fig=self.ext_humidity_fig)
         #self.worker.signals.progress.connect(self.show_temp_graph)
         
         self.worker.signals.registerData.connect(self.add_data_list)
@@ -326,6 +420,7 @@ class MyApp(QtWidgets.QMainWindow, Ui_MainWindow):
             self.clockSensorList.addItem(item)
         
         self.temperatureSensorList.itemSelectionChanged.connect(self.return_checked_sensor_list)
+        self.clockSensorList.itemSelectionChanged.connect(self.return_checked_sensor_list)
 
         print(result)
         
