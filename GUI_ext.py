@@ -140,7 +140,7 @@ class Worker(QRunnable):
         for sensor in sensor_data_list:
             print(sensor)
             sensor_name=sensor['name']
-            if sensor_name in result:
+            if sensor_name in result['ext']:
                     result['ext'][sensor_name]['h'].append(sensor['h'])
                     result['ext'][sensor_name]['t'].append(sensor['t'])
             else:
@@ -467,6 +467,8 @@ class MyApp(QtWidgets.QMainWindow, Ui_MainWindow):
     def clear_graphs(self):
         self.temp_fig.data=[]
         self.clock_fig.data=[]
+        self.ext_temp_fig.data=[]
+        self.ext_humidity_fig.data=[]
         self.qdash.clearGraph=True
         self.dataNameList.clear()
         
@@ -477,6 +479,9 @@ class MyApp(QtWidgets.QMainWindow, Ui_MainWindow):
             del it
             self.clear_graph_with_data_name(self.temp_fig,data_name)
             self.clear_graph_with_data_name(self.clock_fig,data_name)
+            self.clear_graph_with_data_name(self.ext_temp_fig,data_name)
+            self.clear_graph_with_data_name(self.ext_humidity_fig,data_name)
+
             
     def clear_graph_with_data_name(self, fig, data_name):
         data_list=list(fig.data)
